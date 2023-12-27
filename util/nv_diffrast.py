@@ -47,7 +47,7 @@ class MeshRenderer(nn.Module):
     def __init__(self,
                 rasterize_fov,
                 znear=0.1,
-                zfar=10, 
+                zfar=10,
                 rasterize_size=224):
         super(MeshRenderer, self).__init__()
 
@@ -77,12 +77,12 @@ class MeshRenderer(nn.Module):
         # trans to homogeneous coordinates of 3d vertices, the direction of y is the same as v
         if vertex.shape[-1] == 3:
             vertex = torch.cat([vertex, torch.ones([*vertex.shape[:2], 1]).to(device)], dim=-1)
-            vertex[..., 1] = -vertex[..., 1] 
+            vertex[..., 1] = -vertex[..., 1]
 
 
         vertex_ndc = vertex @ ndc_proj.t()
         if self.glctx is None:
-            self.glctx = dr.RasterizeGLContext(device=device)
+            self.glctx = dr.RasterizeCudaContext(device=device)
             # print("create glctx on device cuda:%d"%device.index)
 
         # print('vertex_ndc shape:{}'.format(vertex_ndc.shape))  # Size([1, 35709, 4])
@@ -95,7 +95,7 @@ class MeshRenderer(nn.Module):
 
             print('fnum shape:{}'.format(fnum.shape))
 
-            fstartidx = torch.cumsum(fnum, dim=0) - fnum 
+            fstartidx = torch.cumsum(fnum, dim=0) - fnum
             ranges = torch.cat([fstartidx, fnum], axis=1).type(torch.int32).cpu()
             for i in range(tri.shape[0]):
                 tri[i] = tri[i] + i*vum
@@ -106,7 +106,7 @@ class MeshRenderer(nn.Module):
         tri = tri.type(torch.int32).contiguous()
         rast_out, _ = dr.rasterize(self.glctx, vertex_ndc.contiguous(), tri, resolution=[rsize, rsize], ranges=ranges)
 
-        depth, _ = dr.interpolate(vertex.reshape([-1,4])[...,2].unsqueeze(1).contiguous(), rast_out, tri) 
+        depth, _ = dr.interpolate(vertex.reshape([-1,4])[...,2].unsqueeze(1).contiguous(), rast_out, tri)
         depth = depth.permute(0, 3, 1, 2)
         mask =  (rast_out[..., 3] > 0).float().unsqueeze(1)
         depth = mask * depth
@@ -144,7 +144,7 @@ class MeshRenderer(nn.Module):
             image = image.permute(0, 3, 1, 2)
             image = mask * image
 
-        
+
         return mask, depth, image, occ
 
     def render_uv_texture(self, vertex, tri, uv, uv_texture):
@@ -170,7 +170,7 @@ class MeshRenderer(nn.Module):
 
         vertex_ndc = vertex @ ndc_proj.t()
         if self.glctx is None:
-            self.glctx = dr.RasterizeGLContext(device=device)
+            self.glctx = dr.RasterizeCudaContext(device=device)
             # print("create glctx on device cuda:%d" % device.index)
 
         # print('vertex_ndc shape:{}'.format(vertex_ndc.shape))  # Size([1, 35709, 4])
@@ -241,7 +241,7 @@ class MeshRenderer(nn.Module):
 
         vertex_ndc = vertex @ ndc_proj.t()
         if self.glctx is None:
-            self.glctx = dr.RasterizeGLContext(device=device)
+            self.glctx = dr.RasterizeCudaContext(device=device)
             # print("create glctx on device cuda:%d" % device.index)
 
         # print('vertex_ndc shape:{}'.format(vertex_ndc.shape))  # Size([1, 35709, 4])
@@ -362,4 +362,3 @@ class MeshRenderer(nn.Module):
         tex_mask = 1.0 - tex_mask
 
         return mask, depth, image, tex.detach(), tex_mask
-
