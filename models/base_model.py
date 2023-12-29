@@ -126,15 +126,15 @@ class BaseModel(ABC):
                     if convert_sync_batchnorm:
                         module = torch.nn.SyncBatchNorm.convert_sync_batchnorm(module)
                     setattr(self, name, torch.nn.parallel.DistributedDataParallel(module.to(self.device),
-                        device_ids=[self.device.index], 
+                        device_ids=[self.device.index],
                         find_unused_parameters=True, broadcast_buffers=True))
-            
+
             # DistributedDataParallel is not needed when a module doesn't have any parameter that requires a gradient.
             for name in self.parallel_names:
                 if isinstance(name, str) and name not in self.model_names:
                     module = getattr(self, name)
                     setattr(self, name, module.to(self.device))
-            
+
         # put state_dict of optimizer to gpu device
         if self.opt.phase != 'test':
             if self.opt.continue_train:
@@ -229,7 +229,7 @@ class BaseModel(ABC):
 
         save_filename = 'epoch_%s.pth' % (epoch)
         save_path = os.path.join(self.save_dir, save_filename)
-        
+
         save_dict = {}
         for name in self.model_names:
             if isinstance(name, str):
@@ -241,14 +241,14 @@ class BaseModel(ABC):
 
         save_dict['alpha'] = self.alpha.detach()
         save_dict['beta'] = self.beta.detach()
-                
+
 
         for i, optim in enumerate(self.optimizers):
             save_dict['opt_%02d'%i] = optim.state_dict()
 
         for i, sched in enumerate(self.schedulers):
             save_dict['sched_%02d'%i] = sched.state_dict()
-        
+
         torch.save(save_dict, save_path)
 
     def __patch_instance_norm_state_dict(self, state_dict, module, keys, i=0):
@@ -274,7 +274,7 @@ class BaseModel(ABC):
         if self.opt.isTrain and self.opt.pretrained_name is not None:
             load_dir = os.path.join(self.opt.checkpoints_dir, self.opt.pretrained_name)
         else:
-            load_dir = self.save_dir    
+            load_dir = self.save_dir
         load_filename = 'epoch_%s.pth' % (epoch)
         load_path = os.path.join(load_dir, load_filename)
         state_dict = torch.load(load_path, map_location=self.device)
@@ -300,13 +300,13 @@ class BaseModel(ABC):
                     print('loading the sched from %s' % load_path)
                     for i, sched in enumerate(self.schedulers):
                         sched.load_state_dict(state_dict['sched_%02d'%i])
-                except:
+                except Exception:
                     print('Failed to load schedulers, set schedulers according to epoch count manually')
                     for i, sched in enumerate(self.schedulers):
                         sched.last_epoch = self.opt.epoch_count - 1
-                    
 
-            
+
+
 
     def print_networks(self, verbose):
         """Print the total number of parameters in the network and (if verbose) network architecture
