@@ -32,7 +32,7 @@ class BaseModel(ABC):
         """
         self.opt = opt
         self.isTrain = opt.isTrain
-        self.device = torch.device('cuda')
+        self.device = opt.device if 'device' in opt else torch.device('cuda')
         self.save_dir = os.path.join(opt.checkpoints_dir, opt.name)  # save all the checkpoints to save_dir
         self.loss_names = []
         self.model_names = []

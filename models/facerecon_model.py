@@ -14,6 +14,7 @@ from models.de_retouching_module import DeRetouchingModule
 from pix2pix.pix2pix_model import Pix2PixModel
 from pix2pix.pix2pix_options import Pix2PixOptions
 import imageio
+from rich import print
 
 
 class FaceReconModel(BaseModel):
@@ -44,7 +45,7 @@ class FaceReconModel(BaseModel):
             parser.add_argument('--use_crop_face', type=util_.str2bool, nargs='?', const=True, default=False, help='use crop mask for photo loss')
             parser.add_argument('--use_predef_M', type=util_.str2bool, nargs='?', const=True, default=False, help='use predefined M for predicted face')
 
-            
+
             # augmentation parameters
             parser.add_argument('--shift_pixs', type=float, default=10., help='shift pixels')
             parser.add_argument('--scale_delta', type=float, default=0.1, help='delta scale factor')
@@ -95,11 +96,12 @@ class FaceReconModel(BaseModel):
 
         self.net_recon = networks.define_net_recon(
             net_recon=opt.net_recon, use_last_fc=opt.use_last_fc, init_path=None
-        )
+        ).to(device=self.device)
 
         self.facemodel_front = ParametricFaceModel(
             bfm_folder=opt.bfm_folder, camera_distance=opt.camera_d, focal=opt.focal, center=opt.center,
-            is_train=True, default_name='BFM_model_front.mat'
+            is_train=opt.isTrain, default_name='BFM_model_front.mat',
+            device=self.device
         )
 
         fov = 2 * np.arctan(opt.center / opt.focal) * 180 / np.pi
@@ -111,10 +113,11 @@ class FaceReconModel(BaseModel):
             rasterize_fov=fov, znear=opt.z_near, zfar=opt.z_far, rasterize_size=int(2 * opt.center)
         )
 
-        self.bfm_UVs = np.load('assets/3dmm_assets/template_mesh/bfm_uvs2.npy')
-        self.bfm_UVs = torch.from_numpy(self.bfm_UVs).to(torch.device('cuda')).float()
+        root_dir = os.path.dirname(opt.bfm_folder)
+        self.bfm_UVs = np.load(os.path.join(root_dir, 'template_mesh', 'bfm_uvs2.npy'))
+        self.bfm_UVs = torch.from_numpy(self.bfm_UVs).to(self.device).float()
 
-        de_retouching_path = 'assets/pretrained_models/de-retouching.pth'
+        de_retouching_path = os.path.join(os.path.dirname(root_dir), 'pretrained_models', 'de-retouching.pth')
         self.de_retouching_module = DeRetouchingModule(de_retouching_path)
 
         self.mid_opt = Pix2PixOptions()
@@ -250,7 +253,7 @@ class FaceReconModel(BaseModel):
         self.pred_vertex, self.pred_tex, self.pred_color, self.pred_lm = \
             self.facemodel_front.compute_for_render(output_coeff)
         self.pred_mask, _, self.pred_face = self.renderer(self.pred_vertex, self.facemodel_front.face_buf, feat=self.pred_color)
-        
+
         self.pred_coeffs_dict = self.facemodel_front.split_coeff(output_coeff)
 
     def predict_results_base(self):
@@ -359,8 +362,11 @@ class FaceReconModel(BaseModel):
         self.deformation_map = self.deformation_map.permute(0, 2, 3, 1)
 
         # render mid frequency results
-        self.pred_vertex, self.pred_color, self.pred_lm, self.verts_proj, self.face_albedo_map, face_shape_transformed, face_norm_roted, self.extra_results = \
-            self.facemodel_front.compute_for_render_hierarchical_mid(self.coeffs, self.deformation_map, self.bfm_UVs, visualize=visualize, de_retouched_albedo_map=self.de_retouched_albedo_map)
+        (self.pred_vertex, self.pred_color, self.pred_lm, self.verts_proj,
+         self.face_albedo_map, face_shape_transformed, face_norm_roted,
+         extra_results_face_data) = \
+            self.facemodel_front.compute_for_render_hierarchical_mid(
+                self.coeffs, self.deformation_map, self.bfm_UVs, visualize=visualize, de_retouched_albedo_map=self.de_retouched_albedo_map)
         self.pred_mask, _, self.pred_face_mid = self.renderer.render_uv_texture(self.pred_vertex,
                                                                                    self.facemodel_front.face_buf,
                                                                                    self.bfm_UVs.clone(),
@@ -380,8 +386,14 @@ class FaceReconModel(BaseModel):
         self.displacement_map = self.displacement_map * tex_valid_mask
 
         # render high frequency results
-        self.pred_color_high, self.extra_results = self.facemodel_front.compute_for_render_hierarchical_high(self.coeffs, self.displacement_map,
-                                                                                         self.de_retouched_albedo_map, face_shape_transformed, face_norm_roted, extra_results=self.extra_results)
+        self.pred_vertex_high, self.pred_color_high = self.facemodel_front.compute_for_render_hierarchical_high(
+            self.coeffs,
+            self.displacement_map,
+            face_albedo_map=self.de_retouched_albedo_map,
+            face_shape_transformed=face_shape_transformed,
+            face_norm_roted=face_norm_roted,
+        )
+
         _, _, self.pred_face_high = self.renderer.render_uv_texture(self.pred_vertex,
                                                                        self.facemodel_front.face_buf,
                                                                        self.bfm_UVs.clone(),
@@ -389,7 +401,23 @@ class FaceReconModel(BaseModel):
 
         self.pred_coeffs_dict = self.facemodel_front.split_coeff(self.coeffs)
 
+        self.extra_results = {}
         if visualize:
+            # generate extra results
+            face_shape, face_shape_base, face_norm = extra_results_face_data
+            self.extra_results = self.facemodel_front.get_extra_results(
+                face_shape=face_shape,
+                face_shape_base=face_shape_base,
+                face_norm=face_norm,
+                face_color_map=self.pred_color,
+                face_shape_transformed=face_shape_transformed,
+                face_norm_roted=face_norm_roted,
+                coeffs=self.coeffs,
+                albedo_for_render=self.face_albedo_map if self.de_retouched_albedo_map is None else self.de_retouched_albedo_map,
+                de_retouched_albedo_map=self.de_retouched_albedo_map,
+                displacement_uv=self.displacement_map
+            )
+
             # high
             self.extra_results['pred_mask_high'] = self.pred_mask
             self.extra_results['pred_face_high_color'] = self.pred_face_high
@@ -518,7 +546,7 @@ class FaceReconModel(BaseModel):
 
                     cur_visualize = visualize if i == n_iters else False
                     # render
-                    self.pred_vertex, self.pred_color, self.pred_lm, self.verts_proj, self.face_albedo_map, face_shape_transformed, face_norm_roted, extra_results = \
+                    self.pred_vertex, self.pred_color, self.pred_lm, self.verts_proj, self.face_albedo_map, face_shape_transformed, face_norm_roted, extra_results_face_data = \
                         self.facemodel_front.compute_for_render_hierarchical_mid(output_coeff_list[j], self.deformation_map,
                                                                                  self.bfm_UVs, visualize=cur_visualize,
                                                                                  de_retouched_albedo_map=self.de_retouched_albedo_map_list[j])
@@ -532,10 +560,9 @@ class FaceReconModel(BaseModel):
                     self.displacement_map = self.displacement_map_list[j] * tex_valid_mask
 
                     # render
-                    self.pred_color_high, extra_results = self.facemodel_front.compute_for_render_hierarchical_high(
+                    self.pred_vertex_high, self.pred_color_high = self.facemodel_front.compute_for_render_hierarchical_high(
                         output_coeff_list[j], self.displacement_map,
-                        self.de_retouched_albedo_map_list[j], face_shape_transformed, face_norm_roted,
-                        extra_results=extra_results)
+                        self.de_retouched_albedo_map_list[j], face_shape_transformed, face_norm_roted)
                     _, _, self.pred_face_high = self.renderer.render_uv_texture(self.pred_vertex,
                                                                                 self.facemodel_front.face_buf,
                                                                                 self.bfm_UVs.clone(),
@@ -558,7 +585,21 @@ class FaceReconModel(BaseModel):
                     self.pred_face_mid_list.append(self.pred_face_mid)
                     self.pred_color_high_list.append(self.pred_color_high)
                     self.pred_face_high_list.append(self.pred_face_high)
-                    if extra_results is not None:
+                    if visualize:
+                        face_shape, face_shape_base, face_norm = extra_results_face_data
+                        extra_results = self.facemodel_front.get_extra_results(
+                            face_shape=face_shape,
+                            face_shape_base=face_shape_base,
+                            face_norm=face_norm,
+                            face_color_map=self.pred_color,
+                            face_shape_transformed=face_shape_transformed,
+                            face_norm_roted=face_norm_roted,
+                            coeffs=self.coeffs,
+                            albedo_for_render=self.face_albedo_map if self.de_retouched_albedo_map is None else self.de_retouched_albedo_map,
+                            de_retouched_albedo_map=self.de_retouched_albedo_map,
+                            displacement_uv=self.displacement_map
+                        )
+
                         extra_results['pred_mask_high'] = self.pred_mask
                         extra_results['pred_face_high_color'] = self.pred_face_high
                         extra_results['pred_mask_mid'] = self.pred_mask
@@ -782,6 +823,61 @@ class FaceReconModel(BaseModel):
                 output_vis_numpy / 255., dtype=torch.float32
             ).permute(0, 3, 1, 2).to(self.device)
 
+    def get_results(self, get_vis: bool = True):
+        results = []
+
+        hrn_output_vis_batch = None
+        if get_vis:
+            self.compute_visuals_hrn()
+            visuals = self.get_current_visuals()
+            hrn_output_vis_batch = (255.0 * visuals['output_vis']).permute(0, 2, 3, 1).detach().cpu().numpy()[..., ::-1]
+
+        # mid mesh
+        vertices_batch = self.pred_vertex.detach()  # get reconstructed shape, [1, 35709, 3]
+        vertices_batch[..., -1] = 10 - vertices_batch[..., -1]  # from camera space to world space
+        vertices_batch = vertices_batch.cpu().numpy()
+
+        # dense mesh
+        dense_vertices_batch = self.pred_vertex_high['vertices'].detach().cpu().numpy()
+        dense_faces_batch = self.pred_vertex_high['faces'].detach().cpu().numpy()
+
+        texture_map_batch = (255.0 * self.pred_color_high).permute(0, 2, 3, 1).detach().cpu().numpy()[..., ::-1]
+
+        for i in range(vertices_batch.shape[0]):
+
+            # export mesh with mid frequency details
+            texture_map = texture_map_batch[i]
+            vertices = vertices_batch[i]
+            normals = estimate_normals(vertices, self.facemodel_front.face_buf.cpu().numpy())
+            face_mesh = {
+                'vertices': vertices,
+                'faces': self.facemodel_front.face_buf.cpu().numpy() + 1,
+                'UVs': self.bfm_UVs.detach().cpu().numpy(),
+                'faces_uv': self.facemodel_front.face_buf.cpu().numpy() + 1,
+                'normals': normals,
+                'texture_map': texture_map,
+            }
+
+            # export mesh with mid and high frequency details
+            dense_mesh = {
+                'vertices': dense_vertices_batch[i],
+                'faces': dense_faces_batch[i],
+            }
+            vertices_zero = dense_mesh['vertices'] == 0.0
+            keep_inds = np.where((vertices_zero[:, 0] * vertices_zero[:, 1] * vertices_zero[:, 2]) == False)[0]
+            dense_mesh, _ = crop_mesh(dense_mesh, keep_inds)  # remove the redundant vertices and faces
+
+            results.append({
+                'mid_mesh': face_mesh,
+                'dense_mesh': dense_mesh
+            })
+
+            if hrn_output_vis_batch is not None:
+                results[-1]['img_vis'] = hrn_output_vis_batch[i]
+
+
+        return results
+
     def save_results(self, out_dir, save_name='test'):
         self.compute_visuals_hrn()
         results = self.get_current_visuals()
@@ -795,10 +891,9 @@ class FaceReconModel(BaseModel):
         vertices_batch = vertices_batch.cpu().numpy()
 
         # dense mesh
-        dense_vertices_batch = self.extra_results['dense_mesh']['vertices']
+        dense_vertices_batch = self.pred_vertex_high['vertices']
         dense_vertices_batch = dense_vertices_batch.detach().cpu().numpy()
-        dense_faces_batch = self.extra_results['dense_mesh']['faces'].detach().cpu().numpy()
-
+        dense_faces_batch = self.pred_vertex_high['faces'].detach().cpu().numpy()
 
         texture_map_batch = (255.0 * self.pred_color_high).permute(0, 2, 3, 1).detach().cpu().numpy()[..., ::-1]
 
@@ -887,6 +982,3 @@ class FaceReconModel(BaseModel):
             results_list.append(results)
 
         return results_list
-
-
-

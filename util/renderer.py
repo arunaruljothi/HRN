@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -20,8 +21,8 @@ def set_rasterizer(type = 'pytorch3d'):
         from torch.utils.cpp_extension import load, CUDA_HOME
         curr_dir = os.path.dirname(__file__)
         standard_rasterize_cuda = \
-            load(name='standard_rasterize_cuda', 
-                sources=[f'{curr_dir}/rasterizer/standard_rasterize_cuda.cpp', f'{curr_dir}/rasterizer/standard_rasterize_cuda_kernel.cu'], 
+            load(name='standard_rasterize_cuda',
+                sources=[f'{curr_dir}/rasterizer/standard_rasterize_cuda.cpp', f'{curr_dir}/rasterizer/standard_rasterize_cuda_kernel.cu'],
                 extra_cuda_cflags = ['-std=c++14', '-ccbin=$$(which gcc)']) # cuda10.2 is not compatible with gcc9. Specify gcc 7
         from standard_rasterize_cuda import standard_rasterize
         # If JIT does not work, try manually installation first
@@ -49,7 +50,7 @@ class StandardRasterizer(nn.Module):
         if h is None:
             h = self.h
         if w is None:
-            w = self.h; 
+            w = self.h;
         bz = vertices.shape[0]
         depth_buffer = torch.zeros([bz, h, w]).float().to(device) + 1e6
         triangle_buffer = torch.zeros([bz, h, w]).int().to(device) - 1
@@ -66,8 +67,8 @@ class StandardRasterizer(nn.Module):
         vertices[...,1] = -1 + (2*vertices[...,1] + 1)/h
         #
         vertices = vertices.clone().float()
-        vertices[...,0] = vertices[..., 0]*w/2 + w/2 
-        vertices[...,1] = vertices[..., 1]*h/2 + h/2 
+        vertices[...,0] = vertices[..., 0]*w/2 + w/2
+        vertices[...,1] = vertices[..., 1]*h/2 + h/2
         vertices[...,2] = vertices[..., 2]*w/2
         f_vs = deca_util.face_vertices(vertices, faces)
 
@@ -125,7 +126,7 @@ class Pytorch3dRasterizer(nn.Module):
                 fixed_vertices[..., 1] = fixed_vertices[..., 1]*h/w
             else:
                 fixed_vertices[..., 0] = fixed_vertices[..., 0]*w/h
-            
+
         meshes_screen = Meshes(verts=fixed_vertices.float(), faces=faces.long())
         pix_to_face, zbuf, bary_coords, dists = rasterize_meshes(
             meshes_screen,
@@ -167,7 +168,8 @@ class SRenderY(nn.Module):
             # faces = faces.verts_idx[None,...]
 
             mesh = read_obj(obj_filename)
-            uvcoords = np.load('assets/3dmm_assets/template_mesh/bfm_uvs2.npy')[None, ...]
+            root_dir = os.path.dirname(obj_filename)
+            uvcoords = np.load(os.path.join(root_dir, 'bfm_uvs2.npy'))[None, ...]
             uvcoords = torch.from_numpy(uvcoords)
             verts = mesh['vertices']
             verts = torch.from_numpy(verts)
@@ -211,14 +213,14 @@ class SRenderY(nn.Module):
                            ((2*pi)/3)*(np.sqrt(3/(4*pi))), (pi/4)*(3)*(np.sqrt(5/(12*pi))), (pi/4)*(3)*(np.sqrt(5/(12*pi))),\
                            (pi/4)*(3)*(np.sqrt(5/(12*pi))), (pi/4)*(3/2)*(np.sqrt(5/(12*pi))), (pi/4)*(1/2)*(np.sqrt(5/(4*pi)))]).float()
         self.register_buffer('constant_factor', constant_factor)
-    
+
     def forward(self, vertices, transformed_vertices, albedos, lights=None, light_type='point'):
         '''
         -- Texture Rendering
         vertices: [batch_size, V, 3], vertices in world space, for calculating normals, then shading
         transformed_vertices: [batch_size, V, 3], range:normalized to [-1,1], projected vertices in image space (that is aligned to the iamge pixel), for rasterization
         albedos: [batch_size, 3, h, w], uv map
-        lights: 
+        lights:
             spherical homarnic: [N, 9(shcoeff), 3(rgb)]
             points/directional lighting: [N, n_lights, 6(xyzrgb)]
         light_type:
@@ -231,15 +233,15 @@ class SRenderY(nn.Module):
         face_vertices = deca_util.face_vertices(vertices, self.faces.expand(batch_size, -1, -1))
         normals = deca_util.vertex_normals(vertices, self.faces.expand(batch_size, -1, -1)); face_normals = deca_util.face_vertices(normals, self.faces.expand(batch_size, -1, -1))
         transformed_normals = deca_util.vertex_normals(transformed_vertices, self.faces.expand(batch_size, -1, -1)); transformed_face_normals = deca_util.face_vertices(transformed_normals, self.faces.expand(batch_size, -1, -1))
-        
-        attributes = torch.cat([self.face_uvcoords.expand(batch_size, -1, -1, -1), 
-                                transformed_face_normals.detach(), 
-                                face_vertices.detach(), 
-                                face_normals], 
+
+        attributes = torch.cat([self.face_uvcoords.expand(batch_size, -1, -1, -1),
+                                transformed_face_normals.detach(),
+                                face_vertices.detach(),
+                                face_normals],
                                 -1)
         # rasterize
         rendering = self.rasterizer(transformed_vertices, self.faces.expand(batch_size, -1, -1), attributes)
-        
+
         ####
         # vis mask
         alpha_images = rendering[:, -1, :, :][:, None, :, :].detach()
@@ -281,7 +283,7 @@ class SRenderY(nn.Module):
             'normal_images': normal_images*alpha_images,
             'transformed_normals': transformed_normals,
         }
-        
+
         return outputs
 
     def add_SHlight(self, normal_images, gamma, init_lit):
@@ -296,12 +298,12 @@ class SRenderY(nn.Module):
         N = normal_images
         sh = torch.stack([
                 N[:,0]*0.+1., N[:,0], N[:,1], \
-                N[:,2], N[:,0]*N[:,1], N[:,0]*N[:,2], 
+                N[:,2], N[:,0]*N[:,1], N[:,0]*N[:,2],
                 N[:,1]*N[:,2], N[:,0]**2 - N[:,1]**2, 3*(N[:,2]**2) - 1
-                ], 
+                ],
                 1) # [bz, 9, h, w]
         sh = sh*self.constant_factor[None,:,None,None]
-        shading = torch.sum(sh_coeff[:,:,:,None,None]*sh[:,:,None,:,:], 1) # [bz, 9, 3, h, w]  
+        shading = torch.sum(sh_coeff[:,:,:,None,None]*sh[:,:,None,:,:], 1) # [bz, 9, 3, h, w]
         return shading
 
     def add_pointlight(self, vertices, normals, lights):
@@ -333,7 +335,7 @@ class SRenderY(nn.Module):
         shading = normals_dot_lights[:,:,:,None]*light_intensities[:,:,None,:]
         return shading.mean(1)
 
-    def render_shape(self, vertices, transformed_vertices, colors = None, images=None, detail_normal_images=None, 
+    def render_shape(self, vertices, transformed_vertices, colors = None, images=None, detail_normal_images=None,
                 lights=None, return_grid=False, uv_detail_normals=None, h=None, w=None):
         '''
         -- rendering shape with detail normal map
@@ -360,11 +362,11 @@ class SRenderY(nn.Module):
         transformed_normals = deca_util.vertex_normals(transformed_vertices, self.faces.expand(batch_size, -1, -1)); transformed_face_normals = deca_util.face_vertices(transformed_normals, self.faces.expand(batch_size, -1, -1))
         if colors is None:
             colors = self.face_colors.expand(batch_size, -1, -1, -1)
-        attributes = torch.cat([colors, 
-                        transformed_face_normals.detach(), 
-                        face_vertices.detach(), 
+        attributes = torch.cat([colors,
+                        transformed_face_normals.detach(),
+                        face_vertices.detach(),
                         face_normals,
-                        self.face_uvcoords.expand(batch_size, -1, -1, -1)], 
+                        self.face_uvcoords.expand(batch_size, -1, -1, -1)],
                         -1)
         # rasterize
         # import ipdb; ipdb.set_trace()
@@ -386,7 +388,7 @@ class SRenderY(nn.Module):
             normal_images = detail_normal_images
 
         shading = self.add_directionlight(normal_images.permute(0,2,3,1).reshape([batch_size, -1, 3]), lights)
-        shading_images = shading.reshape([batch_size, albedo_images.shape[2], albedo_images.shape[3], 3]).permute(0,3,1,2).contiguous()        
+        shading_images = shading.reshape([batch_size, albedo_images.shape[2], albedo_images.shape[3], 3]).permute(0,3,1,2).contiguous()
         shaded_images = albedo_images*shading_images
 
         alpha_images = alpha_images*pos_mask
@@ -395,12 +397,12 @@ class SRenderY(nn.Module):
         else:
             shape_images = shaded_images*alpha_images + images*(1-alpha_images)
         if return_grid:
-            uvcoords_images = rendering[:, 12:15, :, :]; 
+            uvcoords_images = rendering[:, 12:15, :, :];
             grid = (uvcoords_images).permute(0, 2, 3, 1)[:, :, :, :2]
             return shape_images, normal_images, grid, alpha_images
         else:
             return shape_images
-    
+
     def render_depth(self, transformed_vertices):
         '''
         -- rendering depth
@@ -421,7 +423,7 @@ class SRenderY(nn.Module):
         alpha_images = rendering[:, -1, :, :][:, None, :, :].detach()
         depth_images = rendering[:, :1, :, :]
         return depth_images
-    
+
     def render_colors(self, transformed_vertices, colors):
         '''
         -- rendering colors: could be rgb color/ normals, etc

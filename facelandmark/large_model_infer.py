@@ -84,15 +84,15 @@ class FaceInfo:
 class LargeModelInfer:
 
     def __init__(self,ckpt,  device='cuda'):
-        self.large_base_lmks_model = LargeBaseLmkInfer.model_preload(ckpt,  device.lower() == "cuda")
-        self.device = device.lower()
+        self.large_base_lmks_model = LargeBaseLmkInfer.model_preload(ckpt, device)
+        self.device = device
         self.detector = Model(max_size=512, device=device)
         state_dict = torch.load(os.path.join(os.path.dirname(ckpt), 'retinaface_resnet50_2020-07-20_old_torch.pth' ) , map_location="cpu")
         # torch.save(state_dict, './models/retinaface_resnet50_2020-07-20_old_torch.pth', _use_new_zipfile_serialization=False)
         self.detector.load_state_dict(state_dict)
         self.detector.eval()
 
-        
+
     def infer(self, img_bgr):
         landmarks = []
 
@@ -149,7 +149,7 @@ class LargeModelInfer:
             # cv2.imshow("crop resize", crop_img.astype(np.uint8))
             # cv2.waitKey()
 
-            base_lmks = LargeBaseLmkInfer.infer_img(crop_img, self.large_base_lmks_model, self.device=="cuda")
+            base_lmks = LargeBaseLmkInfer.infer_img(crop_img, self.large_base_lmks_model, self.device)
 
             inv_scale = sz / INPUT_SIZE
 
@@ -198,7 +198,7 @@ class LargeModelInfer:
             # cv2.imshow("crop resize", crop_img.astype(np.uint8))
             # cv2.waitKey()
 
-            base_lmks = LargeBaseLmkInfer.infer_img(crop_img, self.large_base_lmks_model, self.device.lower()=="cuda")
+            base_lmks = LargeBaseLmkInfer.infer_img(crop_img, self.large_base_lmks_model, self.device)
 
             inv_scale = sz / INPUT_SIZE
 
@@ -342,7 +342,7 @@ class LargeModelInfer:
                 final_map = np.column_stack(joint_maps)
                 final_maps.append(final_map)
             return final_maps, roi_bboxs
-        
+
 
     def fat_face(self,img, degree= 0.1):
         t1 = time.time()

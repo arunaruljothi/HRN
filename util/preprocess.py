@@ -119,9 +119,9 @@ def scale_trans(img, lm, t, s):
     return cropped_img, inv
 
 # utils for landmark detection
-def align_for_lm(img, five_points):
+def align_for_lm(img, five_points, path: str = 'util/BBRegressorParam_r.mat'):
     five_points = np.array(five_points).reshape([1, 10])
-    params = loadmat('util/BBRegressorParam_r.mat')
+    params = loadmat(path)
     bbox = BBRegression(five_points, params)
     assert(bbox[2] != 0)
     bbox = np.round(bbox).astype(np.int32)

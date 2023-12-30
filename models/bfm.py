@@ -9,7 +9,7 @@ from util import deca_util
 
 
 def perspective_projection(focal, center):
-    # return p.T (N, 3) @ (3, 3) 
+    # return p.T (N, 3) @ (3, 3)
     return np.array([
         focal, 0, center,
         0, focal, center,
@@ -24,18 +24,22 @@ class SH:
 
 
 class ParametricFaceModel:
-    def __init__(self, 
-                bfm_folder='assets/3dmm_assets/BFM',
-                recenter=True,
-                camera_distance=10.,
-                init_lit=np.array([
-                    0.8, 0, 0, 0, 0, 0, 0, 0, 0
-                    ]),
-                focal=1015.,
-                center=112.,
-                is_train=True,
-                default_name='BFM_model_front.mat'):
-        
+    def __init__(
+        self,
+        bfm_folder='assets/3dmm_assets/BFM',
+        recenter=True,
+        camera_distance=10.,
+        init_lit=np.array([
+            0.8, 0, 0, 0, 0, 0, 0, 0, 0
+            ]),
+        focal=1015.,
+        center=112.,
+        is_train=True,
+        default_name='BFM_model_front.mat',
+        device: torch.device | None = None,
+        debug: bool = False
+    ):
+
         if not os.path.isfile(os.path.join(bfm_folder, default_name)):
             transferBFM09(bfm_folder)
         model = loadmat(os.path.join(bfm_folder, default_name))
@@ -43,40 +47,46 @@ class ParametricFaceModel:
         self.mean_shape_ori = model_bfm_front['meanshape'].astype(np.float32)
         # mean face shape. [3*N,1]
         self.mean_shape = model['meanshape'].astype(np.float32)  # (1, 107127)
-        print('mean_shape:{}'.format(self.mean_shape.shape))
 
         # identity basis. [3*N,80]
         self.id_base = model['idBase'].astype(np.float32)  # (107127, 80)
-        print('id_base:{}'.format(self.id_base.shape))
 
         # expression basis. [3*N,64]
         self.exp_base = model['exBase'].astype(np.float32)  # (107127, 64)
-        print('exp_base:{}'.format(self.exp_base.shape))
 
         # mean face texture. [3*N,1] (0-255)
         self.mean_tex = model['meantex'].astype(np.float32)  # (1, 107127)
-        print('mean_tex:{}'.format(self.mean_tex.shape))
 
         # texture basis. [3*N,80]
         self.tex_base = model['texBase'].astype(np.float32) # (107127, 80)
-        print('tex_base:{}'.format(self.tex_base.shape))
 
-        self.mean_tex_uv = np.load('assets/3dmm_assets/bfm_albedo_map_basis/bfm_tex_mean2.npy')
+        root_dir = os.path.dirname(bfm_folder)
+        self.mean_tex_uv = np.load(os.path.join(root_dir, 'bfm_albedo_map_basis', 'bfm_tex_mean2.npy'))
         self.mean_tex_uv = self.mean_tex_uv.reshape((1, -1))
-        self.tex_base_uv = np.load('assets/3dmm_assets/bfm_albedo_map_basis/bfm_texmap_base2.npy')
+        self.tex_base_uv = np.load(os.path.join(root_dir, 'bfm_albedo_map_basis', 'bfm_texmap_base2.npy'))
         self.tex_base_uv = self.tex_base_uv.reshape((-1, 80))
         set_rasterizer('pytorch3d')
-        self.render = SRenderY(224, uv_size=256,
-                               rasterizer_type='pytorch3d').to(torch.device('cuda'))
+        self.device = device or 'cpu'
+        self.render = SRenderY(
+            224, uv_size=256, rasterizer_type='pytorch3d',
+            obj_filename=os.path.join(root_dir, 'template_mesh', 'template_bfm.obj')
+        ).to(self.device)
 
         # face indices for each vertex that lies in. starts from 0. [N,8]
         self.point_buf = model['point_buf'].astype(np.int64) - 1  # (35709, 8)
-        print('point_buf:{}'.format(self.point_buf.shape))
-        print('view point_buf:{}'.format(self.point_buf[:3, :]))
 
         # vertex indices for each face. starts from 0. [F,3]
         self.face_buf = model['tri'].astype(np.int64) - 1  # (70789, 3)
-        print('face_buf shape:{}'.format(self.face_buf.shape))
+
+        if debug:
+            print('mean_shape:{}'.format(self.mean_shape.shape))
+            print('id_base:{}'.format(self.id_base.shape))
+            print('exp_base:{}'.format(self.exp_base.shape))
+            print('mean_tex:{}'.format(self.mean_tex.shape))
+            print('tex_base:{}'.format(self.tex_base.shape))
+            print('point_buf:{}'.format(self.point_buf.shape))
+            print('view point_buf:{}'.format(self.point_buf[:3, :]))
+            print('face_buf shape:{}'.format(self.face_buf.shape))
 
         # vertex indices for 68 landmarks. starts from 0. [68,1]
         self.keypoints = np.squeeze(model['keypoints']).astype(np.int64) - 1
@@ -97,7 +107,6 @@ class ParametricFaceModel:
 
         self.center = center
         self.persc_proj = perspective_projection(focal, self.center)
-        self.device = 'cpu'
         self.camera_distance = camera_distance
         self.SH = SH()
         self.init_lit = init_lit.reshape([1, 1, -1]).astype(np.float32)
@@ -108,7 +117,7 @@ class ParametricFaceModel:
             if type(value).__module__ == np.__name__:
                 setattr(self, key, torch.tensor(value).to(device))
 
-    
+
     def compute_shape(self, id_coeff, exp_coeff):
         """
         Return:
@@ -164,7 +173,7 @@ class ParametricFaceModel:
         face_norm = torch.cross(e1, e2, dim=-1)
         face_norm = F.normalize(face_norm, dim=-1, p=2)
         face_norm = torch.cat([face_norm, torch.zeros(face_norm.shape[0], 1, 3).to(self.device)], dim=1)
-        
+
         vertex_norm = torch.sum(face_norm[:, self.point_buf], dim=2)
         vertex_norm = F.normalize(vertex_norm, dim=-1, p=2)
         return vertex_norm
@@ -282,13 +291,13 @@ class ParametricFaceModel:
         ones = torch.ones([batch_size, 1]).to(self.device)
         zeros = torch.zeros([batch_size, 1]).to(self.device)
         x, y, z = angles[:, :1], angles[:, 1:2], angles[:, 2:],
-        
+
         rot_x = torch.cat([
             ones, zeros, zeros,
-            zeros, torch.cos(x), -torch.sin(x), 
+            zeros, torch.cos(x), -torch.sin(x),
             zeros, torch.sin(x), torch.cos(x)
         ], dim=1).reshape([batch_size, 3, 3])
-        
+
         rot_y = torch.cat([
             torch.cos(y), zeros, torch.sin(y),
             zeros, ones, zeros,
@@ -346,7 +355,7 @@ class ParametricFaceModel:
 
         Parameters:
             face_proj       -- torch.tensor, size (B, N, 2)
-        """  
+        """
         return face_proj[:, self.keypoints]
 
     def split_coeff(self, coeffs):
@@ -446,7 +455,7 @@ class ParametricFaceModel:
         face_shape_transformed = self.transform(face_shape, rotation, coef_dict['trans'])
         face_vertex = self.to_camera(face_shape_transformed.clone())
         face_vertex_noTrans = self.to_camera(face_shape.clone())
-        
+
         face_proj = self.to_image(face_vertex)
         landmark = self.get_landmarks(face_proj)
 
@@ -471,7 +480,7 @@ class ParametricFaceModel:
         return shaded_texture
 
     def compute_for_render_hierarchical_mid(self, coeffs, deformation_map, UVs, visualize=False, de_retouched_albedo_map=None):
-        if type(coeffs) == dict:
+        if isinstance(coeffs, dict):
             coef_dict = coeffs
         elif type(coeffs) == torch.Tensor:
             coef_dict = self.split_coeff(coeffs)
@@ -502,60 +511,119 @@ class ParametricFaceModel:
         albedo_for_render = face_albedo_map if de_retouched_albedo_map is None else de_retouched_albedo_map
         face_color_map = self.compute_color_map(albedo_for_render, face_norm_roted_uv, coef_dict['gamma'])
 
-        extra_results = None
-        if visualize:
-            extra_results = {}
-            extra_results['tex_mid_color'] = face_color_map
+        # for extra results processing
+        extra_results_face_data = (face_shape, face_shape_base, face_norm)
 
-            face_shape_transformed_base = self.transform(face_shape_base, rotation, coef_dict['trans'])
-            face_vertex_base = self.to_camera(face_shape_transformed_base.clone())
-            extra_results['pred_vertex_base'] = face_vertex_base
-            face_norm_base = self.compute_norm(face_shape_base)
-            face_norm_roted_base = face_norm_base @ rotation
+        return (
+            face_vertex,
+            face_color_map,
+            landmark,
+            face_proj,
+            face_albedo_map,
+            face_shape_transformed,
+            face_norm_roted,
+            extra_results_face_data
+        )
 
-            batch_size = albedo_for_render.shape[0]
-            size = albedo_for_render.shape[2]
-            gray_tex = torch.ones((batch_size, 3, size, size), dtype=torch.float32).to(self.device) * 0.8
-            zero_displacement = torch.zeros((batch_size, 1, size, size), dtype=torch.float32).to(self.device)
+    def get_extra_results(
+        self,
+        *,
+        face_shape,
+        face_shape_base,
+        face_norm,
+        face_color_map,
+        face_shape_transformed,
+        face_norm_roted,
+        coeffs,
+        albedo_for_render,
+        de_retouched_albedo_map,
+        displacement_uv
+    ):
+        if isinstance(coeffs, dict):
+            coef_dict = coeffs
+        elif type(coeffs) == torch.Tensor:
+            coef_dict = self.split_coeff(coeffs)
 
-            tex_mid_gray = self.compute_color_with_displacement(gray_tex.detach(), face_shape_transformed,
-                                                                 face_norm_roted, zero_displacement, coef_dict['gamma'])
-            tex_mid_gray = self.recolor_texture(tex_mid_gray)
-            extra_results['tex_mid_gray'] = tex_mid_gray
 
-            tex_base_color = self.compute_color_with_displacement(albedo_for_render, face_shape_transformed_base,
-                                                                 face_norm_roted_base, zero_displacement, coef_dict['gamma'])
-            extra_results['tex_base_color'] = tex_base_color
+        extra_results = {}
+        extra_results['tex_mid_color'] = face_color_map
 
-            tex_base_gray = self.compute_color_with_displacement(gray_tex.detach(), face_shape_transformed_base,
-                                                                 face_norm_roted_base, zero_displacement, coef_dict['gamma'])
-            tex_base_gray = self.recolor_texture(tex_base_gray)
-            extra_results['tex_base_gray'] = tex_base_gray
+        rotation = self.compute_rotation(coef_dict['angle'])
+        face_shape_transformed_base = self.transform(face_shape_base, rotation, coef_dict['trans'])
+        face_vertex_base = self.to_camera(face_shape_transformed_base.clone())
+        extra_results['pred_vertex_base'] = face_vertex_base
+        face_norm_base = self.compute_norm(face_shape_base)
+        face_norm_roted_base = face_norm_base @ rotation
 
-            # to export face rotating video
-            init_angle = torch.zeros_like(coef_dict['angle']).to(coef_dict['angle'].device)
+        batch_size = albedo_for_render.shape[0]
+        size = albedo_for_render.shape[2]
+        gray_tex = torch.ones((batch_size, 3, size, size), dtype=torch.float32).to(self.device) * 0.8
+        zero_displacement = torch.zeros((batch_size, 1, size, size), dtype=torch.float32).to(self.device)
 
-            pi = 3.14
-            n_frame = 30
-            y_angles = torch.linspace(-pi / 6, pi / 6, steps=n_frame).float()
+        tex_mid_gray = self.compute_color_with_displacement(gray_tex.detach(), face_shape_transformed,
+                                                                face_norm_roted, zero_displacement, coef_dict['gamma'])
+        tex_mid_gray = self.recolor_texture(tex_mid_gray)
+        extra_results['tex_mid_gray'] = tex_mid_gray
 
-            extra_results['face_shape_transformed_list'] = []
-            extra_results['face_norm_roted_list'] = []
-            extra_results['face_vertex_list'] = []
-            for y_angle in y_angles:
-                cur_angle = init_angle.clone()
-                cur_angle[:, 1] = y_angle
-                cur_angle[:, 0] = pi / 36
-                cur_rotation = self.compute_rotation(cur_angle)
-                cur_face_shape_transformed = self.transform(face_shape, cur_rotation, coef_dict['trans'] * 0)
-                cur_face_norm_roted = face_norm @ cur_rotation
-                cur_face_vertex = self.to_camera(cur_face_shape_transformed.clone())
+        tex_base_color = self.compute_color_with_displacement(albedo_for_render, face_shape_transformed_base,
+                                                                face_norm_roted_base, zero_displacement, coef_dict['gamma'])
+        extra_results['tex_base_color'] = tex_base_color
 
-                extra_results['face_shape_transformed_list'].append(cur_face_shape_transformed)
-                extra_results['face_norm_roted_list'].append(cur_face_norm_roted)
-                extra_results['face_vertex_list'].append(cur_face_vertex)
+        tex_base_gray = self.compute_color_with_displacement(gray_tex.detach(), face_shape_transformed_base,
+                                                                face_norm_roted_base, zero_displacement, coef_dict['gamma'])
+        tex_base_gray = self.recolor_texture(tex_base_gray)
+        extra_results['tex_base_gray'] = tex_base_gray
 
-        return face_vertex, face_color_map, landmark, face_proj, face_albedo_map, face_shape_transformed, face_norm_roted, extra_results
+        # to export face rotating video
+        init_angle = torch.zeros_like(coef_dict['angle']).to(coef_dict['angle'].device)
+
+        pi = 3.14
+        n_frame = 30
+        y_angles = torch.linspace(-pi / 6, pi / 6, steps=n_frame).float()
+
+        extra_results['face_shape_transformed_list'] = []
+        extra_results['face_norm_roted_list'] = []
+        extra_results['face_vertex_list'] = []
+        for y_angle in y_angles:
+            cur_angle = init_angle.clone()
+            cur_angle[:, 1] = y_angle
+            cur_angle[:, 0] = pi / 36
+            cur_rotation = self.compute_rotation(cur_angle)
+            cur_face_shape_transformed = self.transform(face_shape, cur_rotation, coef_dict['trans'] * 0)
+            cur_face_norm_roted = face_norm @ cur_rotation
+            cur_face_vertex = self.to_camera(cur_face_shape_transformed.clone())
+
+            extra_results['face_shape_transformed_list'].append(cur_face_shape_transformed)
+            extra_results['face_norm_roted_list'].append(cur_face_norm_roted)
+            extra_results['face_vertex_list'].append(cur_face_vertex)
+
+
+        extra_results['tex_high_color'] = face_color_map
+
+        batch_size = de_retouched_albedo_map.shape[0]
+        size = de_retouched_albedo_map.shape[2]
+        gray_tex = torch.ones((batch_size, 3, size, size), dtype=torch.float32).to(self.device) * 0.8
+
+        tex_high_gray = self.compute_color_with_displacement(gray_tex.detach(), face_shape_transformed,
+                                                                face_norm_roted, displacement_uv, coef_dict['gamma'])
+        tex_high_gray = self.recolor_texture(tex_high_gray)
+        extra_results['tex_high_gray'] = tex_high_gray
+
+        if 'face_shape_transformed_list' in extra_results:
+            extra_results['tex_high_gray_list'] = []
+            extra_results['tex_high_color_list'] = []
+            for i in range(len(extra_results['face_shape_transformed_list'])):
+                tex_high_gray_i = self.compute_color_with_displacement(gray_tex.detach(), extra_results['face_shape_transformed_list'][i],
+                                                                        extra_results['face_norm_roted_list'][i], displacement_uv, coef_dict['gamma'])
+                # tex_high_gray_i = self.recolor_texture(tex_high_gray_i)
+                extra_results['tex_high_gray_list'].append(tex_high_gray_i)
+
+                tex_high_color_i = self.compute_color_with_displacement(de_retouched_albedo_map.detach(), extra_results['face_shape_transformed_list'][i],
+                                                                        extra_results['face_norm_roted_list'][i], displacement_uv, coef_dict['gamma'])
+                extra_results['tex_high_color_list'].append(tex_high_color_i)
+
+        return extra_results
+
 
     def get_dense_mesh(self, uv_z, coarse_verts, coarse_normals):
         ''' Convert displacement map into detail normal map
@@ -573,7 +641,7 @@ class ParametricFaceModel:
         }
         return dense_mesh
 
-    def compute_for_render_hierarchical_high(self, coeffs, displacement_uv, face_albedo_map, face_shape_transformed, face_norm_roted, extra_results=None):
+    def compute_for_render_hierarchical_high(self, coeffs, displacement_uv, face_albedo_map, face_shape_transformed, face_norm_roted):
 
         if type(coeffs) == dict:
             coef_dict = coeffs
@@ -581,36 +649,10 @@ class ParametricFaceModel:
             coef_dict = self.split_coeff(coeffs)
 
         face_color_map = self.compute_color_with_displacement(face_albedo_map, face_shape_transformed, face_norm_roted, displacement_uv, coef_dict['gamma'])
+        # always generate a dense mesh
+        dense_mesh = self.get_dense_mesh(displacement_uv, face_shape_transformed, face_norm_roted)
 
-        if extra_results is not None:
-            dense_mesh = self.get_dense_mesh(displacement_uv, face_shape_transformed, face_norm_roted)
-            extra_results['dense_mesh'] = dense_mesh
-
-            extra_results['tex_high_color'] = face_color_map
-
-            batch_size = face_albedo_map.shape[0]
-            size = face_albedo_map.shape[2]
-            gray_tex = torch.ones((batch_size, 3, size, size), dtype=torch.float32).to(self.device) * 0.8
-
-            tex_high_gray = self.compute_color_with_displacement(gray_tex.detach(), face_shape_transformed,
-                                                                 face_norm_roted, displacement_uv, coef_dict['gamma'])
-            tex_high_gray = self.recolor_texture(tex_high_gray)
-            extra_results['tex_high_gray'] = tex_high_gray
-
-            if 'face_shape_transformed_list' in extra_results:
-                extra_results['tex_high_gray_list'] = []
-                extra_results['tex_high_color_list'] = []
-                for i in range(len(extra_results['face_shape_transformed_list'])):
-                    tex_high_gray_i = self.compute_color_with_displacement(gray_tex.detach(), extra_results['face_shape_transformed_list'][i],
-                                                                         extra_results['face_norm_roted_list'][i], displacement_uv, coef_dict['gamma'])
-                    # tex_high_gray_i = self.recolor_texture(tex_high_gray_i)
-                    extra_results['tex_high_gray_list'].append(tex_high_gray_i)
-
-                    tex_high_color_i = self.compute_color_with_displacement(face_albedo_map.detach(), extra_results['face_shape_transformed_list'][i],
-                                                                           extra_results['face_norm_roted_list'][i], displacement_uv, coef_dict['gamma'])
-                    extra_results['tex_high_color_list'].append(tex_high_color_i)
-
-        return face_color_map, extra_results
+        return dense_mesh, face_color_map
 
     def reverse_recenter(self, face_shape):
         batch_size = face_shape.shape[0]
@@ -653,4 +695,3 @@ class ParametricFaceModel:
         face_shape = face_shape + offset_shape
 
         return face_shape, offset_shape
-
